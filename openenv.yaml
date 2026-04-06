@@ -1,0 +1,317 @@
+name: CorpExpenseAudit
+version: "1.0.0"
+description: |
+  AI agent that acts as a Finance Auditor reviewing employee expense claims for policy violations, 
+  GST compliance, and fraud detection. The agent must categorize claims, verify GST compliance, 
+  detect fraudulent patterns, and make approval/rejection decisions.
+
+author: "Meta + Scaler Hackathon"
+contact: "support@corpexpenseaudit.com"
+license: "MIT"
+
+environment:
+  class_path: "environment.CorpExpenseAudit"
+  entry_point: |
+    from environment import CorpExpenseAudit
+    env = CorpExpenseAudit(task_difficulty="easy")
+    env.reset()
+
+action_space:
+  type: "discrete"
+  description: "Actions for auditing expense claims"
+  actions:
+    - name: "inspect_claim"
+      description: "Inspect a specific claim to view full details"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Unique identifier of the claim to inspect"
+          required: true
+      reward_signal: "+0.02 for investigation"
+    
+    - name: "categorize_claim"
+      description: "Categorize an expense claim (travel, meals, accommodation, etc.)"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID to categorize"
+          required: true
+        category:
+          type: "string"
+          enum: ["travel", "meals", "accommodation", "office_supplies", "equipment", "entertainment", "miscellaneous"]
+          description: "Category for the expense"
+          required: true
+        confidence:
+          type: "float"
+          min: 0.0
+          max: 1.0
+          description: "Confidence level (0-1)"
+          default: 0.5
+      reward_signal: "+0.15 * confidence if correct, -0.08 if wrong"
+    
+    - name: "verify_gst"
+      description: "Verify GST compliance for a claim"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID to verify"
+          required: true
+      reward_signal: "+0.20 for compliant, +0.15 for detection of non-compliance"
+    
+    - name: "flag_fraud"
+      description: "Flag a claim as fraudulent"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID to flag"
+          required: true
+        reason:
+          type: "string"
+          description: "Reason for fraud flag"
+          required: true
+        fraud_types:
+          type: "array"
+          items: "string"
+          description: "Types of fraud detected"
+          default: []
+      reward_signal: "+0.30 if fraud claim is correct, -0.25 if false positive"
+    
+    - name: "approve_claim"
+      description: "Approve a claim for payment"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID to approve"
+          required: true
+        approved_amount:
+          type: "float"
+          description: "Amount approved for payment"
+          required: true
+      reward_signal: "+0.25 * accuracy if valid, -0.40 if fraudulent claim approved"
+    
+    - name: "reject_claim"
+      description: "Reject a claim"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID to reject"
+          required: true
+        reason:
+          type: "string"
+          description: "Reason for rejection"
+          required: true
+      reward_signal: "+0.30 if fraudulent, +0.20 if policy violation, -0.20 if valid claim"
+    
+    - name: "request_more_info"
+      description: "Request additional information for a claim"
+      parameters:
+        claim_id:
+          type: "string"
+          description: "Claim ID"
+          required: true
+        information_needed:
+          type: "string"
+          description: "Type of information requested"
+          required: true
+      reward_signal: "+0.05 for appropriate info requests"
+    
+    - name: "export_final_report"
+      description: "Generate and export the final audit report"
+      parameters: {}
+      reward_signal: "Bonus based on final accuracy (0.0-0.5)"
+
+observation_space:
+  type: "dict"
+  description: "Current audit state and claim details"
+  fields:
+    task_id:
+      type: "string"
+      description: "Unique task identifier"
+    task_difficulty:
+      type: "string"
+      enum: ["easy", "medium", "hard"]
+      description: "Task difficulty level"
+    current_step:
+      type: "integer"
+      description: "Current step number"
+    max_steps:
+      type: "integer"
+      description: "Maximum allowed steps"
+    pending_claims:
+      type: "array"
+      items: "string"
+      description: "List of claim IDs pending review"
+    reviewed_count:
+      type: "integer"
+      description: "Number of claims reviewed"
+    total_claims:
+      type: "integer"
+      description: "Total number of claims in task"
+    total_reward:
+      type: "float"
+      description: "Cumulative reward so far"
+    audit_complete:
+      type: "boolean"
+      description: "Whether audit is complete"
+    final_accuracy:
+      type: ["float", "null"]
+      description: "Final accuracy score (0.0-1.0) when complete"
+    claims_summary:
+      type: "array"
+      items: "object"
+      description: "Summary information for each claim"
+
+models:
+  ExpenseClaim:
+    description: "Individual expense claim"
+    fields:
+      - claim_id (string): Unique claim identifier
+      - employee_id (string): Employee who submitted claim
+      - amount (float): Claimed amount in INR
+      - claimed_category (string): Category claimed by employee
+      - correct_category (string): Ground truth category
+      - description (string): Claim description
+      - merchant_name (string): Merchant/vendor name
+      - has_gst_invoice (bool): Whether GST invoice exists
+      - gst_invoice_valid (bool): Ground truth GST validity
+      - is_fraud (bool): Ground truth fraud flag
+      - fraud_types (list): Types of fraud if fraudulent
+      - policy_compliant (bool): Policy compliance ground truth
+
+  AuditState:
+    description: "Current audit process state"
+    fields:
+      - all_claims (list): All claims in task
+      - pending_claims (list): Claim IDs pending review
+      - reviewed_decisions (dict): Decisions made
+      - total_reward (float): Cumulative reward
+      - current_step (int): Current step number
+
+reward_function:
+  description: "Dense reward function with partial progress signals"
+  components:
+    categorization:
+      description: "Correct claim categorization"
+      reward: "+0.15 * confidence (if correct), -0.08 (if wrong)"
+      frequency: "Per categorization action"
+    
+    gst_verification:
+      description: "GST compliance verification"
+      reward: "+0.20 (compliant), +0.15 (non-compliant detection)"
+      frequency: "Per verification"
+    
+    fraud_detection:
+      description: "Fraud pattern detection"
+      reward: "+0.30 (correct), -0.25 (false positive)"
+      frequency: "Per fraud flag"
+    
+    approval_accuracy:
+      description: "Accurate approval amount"
+      reward: "+0.25 * accuracy (for valid claims)"
+      frequency: "Per approval"
+    
+    approval_of_fraud:
+      description: "Heavy penalty for approving fraud"
+      reward: "-0.40"
+      frequency: "Per fraudulent claim approved"
+    
+    rejection_accuracy:
+      description: "Correct claim rejection"
+      reward: "+0.30 (fraudulent), +0.20 (policy violation), -0.20 (valid claim)"
+      frequency: "Per rejection"
+    
+    efficiency:
+      description: "Step efficiency penalty"
+      reward: "-0.15 (max steps exceeded), -0.02 (every 5 steps after 10)"
+      frequency: "Per step"
+    
+    final_bonus:
+      description: "Bonus based on final accuracy"
+      reward: "+0.5 * final_accuracy"
+      frequency: "At audit completion"
+
+tasks:
+  - id: "easy"
+    name: "Easy - Basic Expense Audit"
+    description: "8-10 simple domestic expense claims with basic categorization and policy checks"
+    difficulty: "easy"
+    num_claims: 9
+    num_fraudulent: 0
+    fraud_types: []
+    max_steps: 40
+    evaluation_metric: "Final accuracy score (0.0-1.0)"
+    success_criteria: "Score >= 0.70"
+    expected_duration: "10-15 minutes"
+  
+  - id: "medium"
+    name: "Medium - Mixed Claims with Missing Documents"
+    description: "12-15 mixed claims with missing receipts, GST validation issues, and basic fraud patterns"
+    difficulty: "medium"
+    num_claims: 15
+    num_fraudulent: 3
+    fraud_types: ["fake_gst_invoice", "personal_vs_business", "duplicate_claim"]
+    max_steps: 50
+    evaluation_metric: "Final accuracy score + fraud detection rate"
+    success_criteria: "Score >= 0.60 AND fraud_detection >= 0.70"
+    expected_duration: "15-25 minutes"
+  
+  - id: "hard"
+    name: "Hard - Complex Fraud Detection"
+    description: "15-18 claims with sophisticated fraud patterns including duplicates, inflated amounts, same-day trips, fake invoices, and serial claims"
+    difficulty: "hard"
+    num_claims: 18
+    num_fraudulent: 7
+    fraud_types: ["duplicate_claim", "inflated_amount", "same_day_round_trip", "fake_gst_invoice", "personal_vs_business", "mismatched_dates", "serial_claim_pattern"]
+    max_steps: 60
+    evaluation_metric: "Final accuracy score + fraud detection rate + GST accuracy"
+    success_criteria: "Score >= 0.75 AND fraud_detection >= 0.85 AND gst_accuracy >= 0.80"
+    expected_duration: "25-40 minutes"
+
+grading:
+  type: "deterministic"
+  description: "Deterministic grading based on agent decisions vs ground truth"
+  metrics:
+    - name: "categorization_accuracy"
+      formula: "Correct categorizations / Total categorizations"
+      weight: 0.30
+    
+    - name: "fraud_detection_rate"
+      formula: "Correctly detected fraudulent claims / Total fraudulent claims"
+      weight: 0.40
+    
+    - name: "gst_accuracy"
+      formula: "Correct GST verifications / Total GST checks"
+      weight: 0.20
+    
+    - name: "approval_accuracy"
+      formula: "Correctly approved valid claims - incorrectly approved fraudulent claims"
+      weight: 0.10
+  
+  final_score_formula: |
+    final_score = (
+      0.3 * categorization_accuracy +
+      0.4 * fraud_detection_rate +
+      0.2 * gst_accuracy +
+      0.1 * min(approval_accuracy, 1.0)
+    )
+    final_score = max(0.0, min(1.0, final_score - fraud_approval_penalty))
+
+tags:
+  - "enterprise"
+  - "auditing"
+  - "fraud-detection"
+  - "gst-compliance"
+  - "policy-enforcement"
+  - "indian-context"
+  - "finance"
+  - "multi-task"
+
+metadata:
+  framework: "OpenEnv"
+  python_version: ">=3.8"
+  dependencies:
+    - "pydantic>=2.0"
+    - "openai>=1.0"
+  checkpoint_support: true
+  deterministic: true
+  max_episode_length: 60
