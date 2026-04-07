@@ -127,6 +127,7 @@ class AuditState(BaseModel):
     max_steps: int
     total_reward: float = 0.0
     step_rewards: List[float] = Field(default_factory=list)
+    inspections: Dict[str, int] = Field(default_factory=dict)  # Track inspection count per claim
     gst_verifications: Dict[str, GSTStatus] = Field(default_factory=dict)
     categorizations: Dict[str, str] = Field(default_factory=dict)
     fraud_flags: Dict[str, str] = Field(default_factory=dict)

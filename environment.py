@@ -36,8 +36,10 @@ class CorpExpenseAudit:
 
     def reset(self) -> Dict[str, Any]:
         """Reset environment and return initial state."""
-        random.seed(self.seed_value)
-        np.random.seed(self.seed_value)
+        # Only seed if explicitly set
+        if self.seed_value is not None:
+            random.seed(self.seed_value)
+            np.random.seed(self.seed_value)
         
         # Generate claims based on difficulty
         if self.task_difficulty == "easy":
@@ -181,7 +183,14 @@ class CorpExpenseAudit:
         if not claim:
             return -0.05, {**info, "error": f"claim_id {claim_id} not found"}
         
-        # Small reward for investigation
+        # REPETITION PENALTY: Prevent inspecting same claim multiple times
+        inspection_count = self.state.inspections.get(claim_id, 0)
+        if inspection_count > 0:
+            # Already inspected this claim! Move to categorization instead
+            return -0.05, {**info, "error": f"Claim {claim_id} already inspected {inspection_count} time(s). Move to categorize/verify/decide."}
+        
+        # First inspection - small reward for investigation
+        self.state.inspections[claim_id] = inspection_count + 1
         reward = 0.02
         
         info["claim_details"] = {
@@ -216,6 +225,11 @@ class CorpExpenseAudit:
         claim = self._get_claim_by_id(claim_id)
         if not claim:
             return -0.05, {**info, "error": f"claim_id {claim_id} not found"}
+        
+        # PENALTY: Prevent reward farming by categorizing the same claim twice
+        if claim_id in self.state.categorizations:
+            # Already categorized this claim! Move on to approval/rejection decision
+            return -0.05, {**info, "error": f"Claim {claim_id} already categorized. Move to approve/reject decision."}
         
         # Check if categorization is correct
         is_correct = category.lower() == claim.correct_category.lower()
