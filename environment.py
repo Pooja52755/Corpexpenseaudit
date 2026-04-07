@@ -36,6 +36,7 @@ class CorpExpenseAudit:
 
     def reset(self) -> Dict[str, Any]:
         """Reset environment and return initial state."""
+
         # Only seed if explicitly set
         if self.seed_value is not None:
             random.seed(self.seed_value)
