@@ -163,16 +163,44 @@ class ExpenseAuditAgent:
                     if claim_id and claim_id in self.claim_states:
                         if action_type == "inspect_claim":
                             self.claim_states[claim_id]["inspected"] = True
+                            # CAPTURE TRUE AMOUNT AND DESCRIPTION from claim_details in info or state
+                            details = info.get('claim_details') or state.get('claim_details')
+                            if details:
+                                self.claim_states[claim_id]['true_amount'] = float(details.get('amount', 100.0))
+                                self.claim_states[claim_id]['description'] = details.get('description', '')
+                                print(f"[DEBUG] Stored in Memory from claim_details: amount={self.claim_states[claim_id]['true_amount']}, desc={self.claim_states[claim_id]['description']}", file=sys.stderr)
+                            else:
+                                # Fallback: try claims_summary
+                                if 'claims_summary' in state:
+                                    for claim in state['claims_summary']:
+                                        if claim.get('claim_id') == claim_id:
+                                            self.claim_states[claim_id]['true_amount'] = float(claim.get('amount', 100.0))
+                                            self.claim_states[claim_id]['description'] = claim.get('description', '')
+                                            print(f"[DEBUG] Stored in Memory from claims_summary: amount={self.claim_states[claim_id]['true_amount']}, desc={self.claim_states[claim_id]['description']}", file=sys.stderr)
+                                            break
                         elif action_type == "categorize_claim":
                             self.claim_states[claim_id]["categorized"] = True
                         elif action_type == "verify_gst":
                             self.claim_states[claim_id]["verified_gst"] = True
                         elif action_type in ["approve_claim", "reject_claim", "flag_fraud"]:
                             self.claim_states[claim_id]["decided"] = True
-                            self.completed_claims.add(claim_id)
+                            self.completed_claims.add(claim_id)  # Mark as completed so we don't repeat it
+                    
+                    # STEP LIMIT: Break early if 6 claims completed or 35 steps reached
+                    if len(self.completed_claims) >= 6 or step_num >= 35:
+                        print(f"[DEBUG] Reached efficiency limit: {len(self.completed_claims)} claims completed or {step_num} steps. Forcing export.", file=sys.stderr)
+                        action = {"action_type": "export_final_report", "action_data": {}}
+                        state, reward, done, info = self.env.step(action)
+                        final_state = state
+                        self.step_count = step_num + 1
+                        self.rewards.append(reward)
+                        action_str = f"{action['action_type']}()"
+                        error_msg = info.get("error") if "error" in info else None
+                        log_step(step=step_num + 1, action=action_str, reward=reward, done=done, error=error_msg)
+                        break
                 
-                # RATE LIMIT FIX: Add delay between requests
-                time.sleep(1.5)
+                # RATE LIMIT FIX: Add delay between requests (reduced to 0.7s for faster testing with smaller model)
+                time.sleep(0.7)
                 
                 # AMNESIA FIX: Track this step in episode history for context
                 self.step_history.append({
@@ -279,10 +307,10 @@ class ExpenseAuditAgent:
             }
         
         # FIX #3: AUTO-SWITCH to next unblocked claim
-        # Find first claim that isn't blocked and isn't in completed
+        # Find first claim that isn't blocked, isn't completed, and isn't in self.completed_claims
         target_claim_id = None
         for claim_id in pending:
-            if claim_id not in self.blocked_claims:
+            if claim_id not in self.blocked_claims and claim_id not in self.completed_claims:
                 target_claim_id = claim_id
                 break
         
@@ -300,7 +328,9 @@ class ExpenseAuditAgent:
                 "inspected": False,
                 "categorized": False,
                 "verified_gst": False,
-                "decided": False
+                "decided": False,
+                "true_amount": None,  # Will be set when inspect_claim succeeds
+                "description": ""  # Will be set when inspect_claim succeeds
             }
         
         claim_state = self.claim_states[target_claim_id]
@@ -319,7 +349,7 @@ class ExpenseAuditAgent:
         history_context = ""
         if self.step_history:
             history_lines = []
-            for entry in self.step_history[-10:]:  # Show last 10 steps
+            for entry in self.step_history[-5:]:  # Show last 5 steps (reduced from 10 to save tokens)
                 step = entry['step']
                 action = entry['action_type']
                 reward = entry['reward']
@@ -327,7 +357,7 @@ class ExpenseAuditAgent:
                 error_str = f" | ERROR: {error}" if error else ""
                 history_lines.append(f"  Step {step}: {action} → reward={reward:+.2f}{error_str}")
             
-            history_context = f"""📋 EPISODE HISTORY (Last 10 steps):
+            history_context = f"""📋 EPISODE HISTORY (Last 5 steps):
 {chr(10).join(history_lines)}
 
 **LEARN FROM HISTORY**: Avoid actions that failed. Use errors to make better decisions.
@@ -356,45 +386,76 @@ IF THE ERROR SAYS "already categorized":
         system_prompt = ("You are an expense auditor. You are currently at STAGE: " + str(next_stage) + "\n\n" +
                         str(history_context) + "\n\n" +
                         str(error_context) + "\n\n" +
+                        "CRITICAL: Category accuracy matters! Correct = +0.15, Wrong = -0.08. That's 0.23 difference per claim!\n" +
+                        "REWARD EXAMPLES:\n" +
+                        "- Hotel booking -> 'travel' = +0.15\n" +
+                        "- Flight reservation -> 'travel' = +0.15\n" +
+                        "- Lunch at restaurant -> 'meals' = +0.15\n" +
+                        "- Laptop purchase -> 'equipment' = +0.15\n" +
+                        "- Accommodation fee -> 'accommodation' = +0.15\n" +
+                        "- Wrong lazy category = -0.08 penalty.\n" +
+                        "FOCUS: Start by reading the claim description carefully before picking a category!\n\n" +
                         "═══ MANDATORY WORKFLOW ═══\n" +
-                        "1. INSPECT: Look at claim details\n" +
+                        "1. INSPECT: Look at claim details and REMEMBER THE AMOUNT\n" +
                         '   REQUIRED KEYS: action_type, action_data with claim_id\n' +
-                        '   Example: {"action_type": "inspect_claim", "action_data": {"claim_id": "claim-123"}}\n\n' +
-                        "2. CATEGORIZE: Assign expense category (travel, meals, accommodation, office_supplies, equipment, entertainment, miscellaneous)\n" +
+                        '   Example: {"action_type": "inspect_claim", "action_data": {"claim_id": "claim-123"}}\n' +
+                        "   IMPORTANT: When you inspect, you will see the claim amount. REMEMBER IT for step 4!\n\n" +
+                        "2. CATEGORIZE: Assign expense category based on the claim DESCRIPTION\n" +
+                        "   Categories: travel, meals, accommodation, equipment, entertainment, miscellaneous\n" +
+                        "   IMPORTANT: Pick the MOST SPECIFIC category based on what the claim is actually for.\n" +
+                        "   If it's about food/restaurants: 'meals'\n" +
+                        "   If it's about flights/hotels/taxis: 'travel'\n" +
+                        "   If it's about computers/software/monitors: 'equipment'\n" +
+                        "   If it's about temporary lodging beyond hotel: 'accommodation'\n" +
+                        "   REWARDS: Correct category = +0.15, Wrong category = -0.08. BE ACCURATE!\n" +
                         '   REQUIRED KEYS: action_type, action_data with claim_id, category, confidence\n' +
-                        '   The category MUST be one of: travel, meals, accommodation, office_supplies, equipment, entertainment, miscellaneous\n' +
-                        '   Example: {"action_type": "categorize_claim", "action_data": {"claim_id": "claim-123", "category": "travel", "confidence": 0.8}}\n' +
-                        "   NOTE: confidence must be between 0.0 and 1.0\n" +
-                        "   FORBIDDEN: Do NOT omit the category key!\n\n" +
+                        '   The category MUST be one of: travel, meals, accommodation, equipment, entertainment, miscellaneous\n' +
+                        '   Example: {"action_type": "categorize_claim", "action_data": {"claim_id": "claim-123", "category": "travel", "confidence": 0.85}}\n' +
+                        "   NOTE: confidence must be between 0.0 and 1.0 (0.9 if you are confident, 0.6 if uncertain)\n" +
+                        "   FORBIDDEN: Do NOT omit the category key! Read descriptions carefully!\n\n" +
                         "3. VERIFY_GST: Check GST invoice (status: compliant, non_compliant, not_applicable, unverifiable)\n" +
                         '   REQUIRED KEYS: action_type, action_data with claim_id\n' +
                         '   Example: {"action_type": "verify_gst", "action_data": {"claim_id": "claim-123"}}\n\n' +
                         "4. DECIDE: Approve, reject, or flag as fraud\n" +
-                        '   REQUIRED KEYS: action_type, action_data with claim_id\n' +
-                        '   Approve: {"action_type": "approve_claim", "action_data": {"claim_id": "claim-123"}}\n' +
+                        '   REQUIRED KEYS for approve: action_type, action_data with claim_id AND approved_amount\n' +
+                        "   CRITICAL: When you call approve_claim, you MUST include the approved_amount.\n" +
+                        "   The approved_amount should be the amount you saw when you ran inspect_claim earlier.\n" +
+                        "   If you don't remember, look at the history to find the inspect result.\n" +
+                        '   Approve: {"action_type": "approve_claim", "action_data": {"claim_id": "claim-123", "approved_amount": 150.50}}\n' +
                         '   Reject: {"action_type": "reject_claim", "action_data": {"claim_id": "claim-123"}}\n' +
-                        '   Flag Fraud: {"action_type": "flag_fraud", "action_data": {"claim_id": "claim-123"}}\n\n' +
+                        '   Flag Fraud: {"action_type": "flag_fraud", "action_data": {"claim_id": "claim-123"}}\n' +
+                        "   IMPORTANT: Once you have approved, rejected, or flagged a claim, that task is COMPLETE.\n" +
+                        "   You MUST move to the next available Claim ID immediately. Do NOT repeat the same claim_id!\n\n" +
                         "FORBIDDEN ACTIONS:\n" +
                         "- If a claim is already INSPECTED, you are STRICTLY FORBIDDEN from inspecting it again.\n" +
                         "  You MUST choose categorize_claim or verify_gst instead.\n" +
                         "- If a claim is already CATEGORIZED, you are STRICTLY FORBIDDEN from categorizing it again.\n" +
                         "  You MUST move to verify_gst or a decision action.\n" +
+                        "- If you have already DECIDED (approved/rejected/flagged) a claim, you MUST move to the next claim_id.\n" +
+                        "  Do NOT approve the same claim twice!\n" +
                         "- NEVER omit the 'category' key in categorize_claim\n" +
-                        "- NEVER use uppercase categories like 'Travel' or 'TRAVEL', always use lowercase\n\n" +
+                        "- NEVER omit the 'approved_amount' key in approve_claim\n" +
+                        "- NEVER use uppercase categories like 'Travel' or 'TRAVEL', always use lowercase\n" +
+                        "- NEVER default to miscellaneous without thinking!\n\n" +
                         "RULES:\n" +
                         '- Use LOWERCASE action names: "inspect_claim" not "INSPECT_CLAIM"\n' +
                         '- Use LOWERCASE categories: "travel" not "Travel"\n' +
                         "- Each claim needs inspect → categorize → verify → decide in order\n" +
+                        "- Once decided, MOVE TO NEXT CLAIM - do not repeat\n" +
                         "- IF YOU GET AN ERROR, DON'T REPEAT IT - move to next stage\n" +
-                        "- Inspecting/categorizing same claim twice = -0.05 penalty\n\n" +
+                        "- Inspecting/categorizing same claim twice = -0.05 penalty\n" +
+                        "- WRONG CATEGORY = -0.08 penalty. RIGHT CATEGORY = +0.15 reward.\n\n" +
                         "RETURN FORMAT:\n" +
                         "Return ONLY valid JSON on one line. No markdown, no code blocks.\n" +
                         'GOOD: {"action_type": "inspect_claim", "action_data": {"claim_id": "claim-001"}}\n' +
                         'GOOD: {"action_type": "categorize_claim", "action_data": {"claim_id": "claim-001", "category": "travel", "confidence": 0.85}}\n' +
                         'GOOD: {"action_type": "verify_gst", "action_data": {"claim_id": "claim-001"}}\n' +
-                        'GOOD: {"action_type": "approve_claim", "action_data": {"claim_id": "claim-001"}}\n' +
+                        'GOOD: {"action_type": "approve_claim", "action_data": {"claim_id": "claim-001", "approved_amount": 250.75}}\n' +
+                       'BAD: Picking miscellaneous without reading the description\n' +
                         'BAD: Missing category in categorize_claim\n' +
+                        'BAD: Missing approved_amount in approve_claim\n' +
                         'BAD: Uppercase category like "Travel"\n' +
+                        'BAD: Approving the same claim twice\n' +
                         'BAD: Markdown or code blocks'
         )
 
@@ -429,7 +490,7 @@ IF THE ERROR SAYS "already categorized":
         if next_stage == "INSPECT":
             action_instruction = f"Use action_type='inspect_claim' with claim_id='{target_claim_id}'. Look at ALL details."
         elif next_stage == "CATEGORIZE":
-            action_instruction = f"Use action_type='categorize_claim' with claim_id='{target_claim_id}'. Pick ONE category: travel, meals, accommodation, office_supplies, equipment, entertainment, or miscellaneous."
+            action_instruction = f"Use action_type='categorize_claim' with claim_id='{target_claim_id}'. Pick ONE category: travel, meals, accommodation, equipment, entertainment, or miscellaneous."
         elif next_stage == "VERIFY_GST":
             action_instruction = f"Use action_type='verify_gst' with claim_id='{target_claim_id}'. Status must be: compliant, non_compliant, not_applicable, or unverifiable."
         else:  # DECIDE
@@ -448,15 +509,18 @@ IF THE ERROR SAYS "already categorized":
                        "JSON FORMAT EXAMPLES FOR THIS STAGE (COPY EXACTLY):\n" +
                        "════════════════════════════════════════════\n\n" +
                        "IF STAGE = INSPECT:\n" +
-                       '  {"action_type": "inspect_claim", "action_data": {"claim_id": "' + target_claim_id + '"}}\n\n' +
+                       '  {"action_type": "inspect_claim", "action_data": {"claim_id": "' + target_claim_id + '"}}\n' +
+                       "  (Remember the amount you see - you'll need it for DECIDE stage!)\n\n" +
                        "IF STAGE = CATEGORIZE (MUST HAVE: claim_id, category, confidence):\n" +
-                       '  {"action_type": "categorize_claim", "action_data": {"claim_id": "' + target_claim_id + '", "category": "travel", "confidence": 0.8}}\n' +
-                       "  Allowed categories: travel, meals, accommodation, office_supplies, equipment, entertainment, miscellaneous\n" +
+                       '  {"action_type": "categorize_claim", "action_data": {"claim_id": "' + target_claim_id + '", "category": "travel", "confidence": 0.85}}\n' +
+                       "  Allowed categories: travel, meals, accommodation, equipment, entertainment, miscellaneous\n" +
+                       "  IMPORTANT: Pick the BEST match based on the claim, not 'miscellaneous'!\n" +
                        "  IMPORTANT: category is REQUIRED - do NOT forget it!\n\n" +
                        "IF STAGE = VERIFY_GST:\n" +
                        '  {"action_type": "verify_gst", "action_data": {"claim_id": "' + target_claim_id + '"}}\n\n' +
                        "IF STAGE = DECIDE:\n" +
-                       '  {"action_type": "approve_claim", "action_data": {"claim_id": "' + target_claim_id + '"}}\n' +
+                       '  {"action_type": "approve_claim", "action_data": {"claim_id": "' + target_claim_id + '", "approved_amount": 125.50}}\n' +
+                       "  ^^^ CRITICAL: Include approved_amount from the inspect result! ^^^\n" +
                        "  OR\n" +
                        '  {"action_type": "reject_claim", "action_data": {"claim_id": "' + target_claim_id + '"}}\n' +
                        "  OR\n" +
@@ -465,9 +529,10 @@ IF THE ERROR SAYS "already categorized":
                        "CRITICAL RULES:\n" +
                        "1. Return ONLY the JSON object on ONE line\n" +
                        "2. No markdown, no code blocks, no explanation\n" +
-                       "3. For CATEGORIZE: Always include the 'category' key with a valid value\n" +
-                       "4. Use lowercase everywhere: 'travel' not 'Travel'\n" +
-                       "5. If you get an error, move to the NEXT stage (don't repeat)\n" +
+                       "3. For CATEGORIZE: Always include the 'category' key - pick the BEST category, not miscellaneous\n" +
+                       "4. For APPROVE: Always include 'approved_amount' from the inspect step\n" +
+                       "5. Use lowercase everywhere: 'travel' not 'Travel'\n" +
+                       "6. If you get an error, move to the NEXT stage (don't repeat)\n" +
                        "════════════════════════════════════════════"
         )
 
@@ -537,6 +602,70 @@ IF THE ERROR SAYS "already categorized":
                 
                 if action.get("action_type") != "export_final_report":
                     action["action_data"]["claim_id"] = target_claim_id
+                    
+                    # DYNAMIC DECISION AMOUNT: Use stored true_amount from inspect stage
+                    if action.get("action_type") == "approve_claim":
+                        true_amount = self.claim_states[target_claim_id].get('true_amount', 100.0)
+                        action["action_data"]["approved_amount"] = true_amount
+                        print(f"[DEBUG] Using stored true_amount {true_amount} for {target_claim_id}", file=sys.stderr)
+                
+                # SMART DEFAULTING: Override LLM's lazy guesses with our keyword logic
+                if action.get("action_type") == "categorize_claim":
+                    action_data = action.get("action_data", {})
+                    valid_categories = ["travel", "meals", "accommodation", "office_supplies", "equipment", "entertainment", "miscellaneous"]
+                    
+                    # Check 1: Missing category entirely
+                    if "category" not in action_data:
+                        print(f"[DEBUG] LLM failed to provide category, using smart fallback", file=sys.stderr)
+                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
+                    
+                    category = action_data.get("category", "").lower()
+                    
+                    # Check 2: Invalid category not in allowed list
+                    if category not in valid_categories:
+                        print(f"[DEBUG] LLM provided invalid category '{category}', using smart fallback", file=sys.stderr)
+                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
+                    
+                    # Check 3: Dictionary-based keyword override - reads description to guarantee correct category
+                    description = self.claim_states[target_claim_id].get('description', '').lower()
+                    print(f"[DEBUG] Using stored description: {description}", file=sys.stderr)
+                    
+                    # Define keyword mappings for each category
+                    keyword_map = {
+                        'travel': ['cab', 'fare', 'flight', 'hotel', 'train', 'uber', 'taxi', 'stay'],
+                        'meals': ['food', 'lunch', 'dinner', 'restaurant', 'meal', 'cafe'],
+                        'equipment': ['laptop', 'monitor', 'keyboard', 'software', 'mouse']
+                    }
+                    
+                    # Check which category keywords match the description
+                    matched_category = None
+                    for cat, keywords in keyword_map.items():
+                        if any(kw in description for kw in keywords):
+                            matched_category = cat
+                            print(f"[DEBUG] Keyword match found for '{cat}' in description, LLM picked '{category}'", file=sys.stderr)
+                            break
+                    
+                    # STRONG OVERRIDE: If keywords found, force to that category
+                    if matched_category:
+                        print(f"[DEBUG] FORCING category to '{matched_category}' (confident keyword-based decision)", file=sys.stderr)
+                        action["action_data"]["category"] = matched_category
+                        action["action_data"]["confidence"] = 1.0
+                    elif category == "miscellaneous":
+                        # If LLM defaults to miscellaneous with no keywords found, use smart fallback
+                        print(f"[DEBUG] LLM defaulted to miscellaneous with no keyword match, using smart fallback", file=sys.stderr)
+                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
+                    else:
+                        # Use LLM's category if valid and no keyword override matched
+                        print(f"[DEBUG] No keyword override matched, using LLM category '{category}'", file=sys.stderr)
+                        action["action_data"]["category"] = category
+                
+                # FORCE AMOUNT ASSIGNMENT: For DECIDE stage, explicitly set from stored memory
+                if action.get("action_type") == "approve_claim":
+                    action["action_data"]["approved_amount"] = self.claim_states[target_claim_id].get('true_amount', 100.0)
+                    print(f"[DEBUG] FORCED approved_amount to {action['action_data']['approved_amount']} from stored true_amount", file=sys.stderr)
+                
+                # FINAL VERIFICATION: Log the complete action before returning
+                print(f"[DEBUG] Final action before return: {action}", file=sys.stderr)
                 
                 # IMPORTANT: Do NOT update claim_state here! Update only after successful env.step() in run_audit
                 # This prevents premature state updates that cause re-inspection loops
@@ -552,7 +681,7 @@ IF THE ERROR SAYS "already categorized":
             return self._fallback_action(state, next_stage, target_claim_id, claim_state)
     
     def _fallback_action(self, state: Dict[str, Any], stage: str, claim_id: str, claim_state: Dict) -> Dict:
-        """Smart fallback that moves through stages with LOWERCASE action names."""
+        """Smart fallback that moves through stages with keyword-based categorization."""
         if stage == "INSPECT":
             return {
                 "action_type": "inspect_claim",
@@ -560,14 +689,43 @@ IF THE ERROR SAYS "already categorized":
                 "reasoning": "Fallback: Start by inspecting"
             }
         elif stage == "CATEGORIZE":
+            # Smart categorization: look at claim description and match keywords
+            category = "travel"  # default to travel (most corporate expenses are travel-related)
+            
+            if state and 'claims_summary' in state:
+                for claim_summary in state['claims_summary']:
+                    if claim_summary['claim_id'] == claim_id:
+                        description = claim_summary.get('description', '').lower()
+                        
+                        # Travel keywords
+                        if any(kw in description for kw in ['flight', 'hotel', 'travel', 'stay', 'ticket', 'booking', 'taxi', 'uber', 'airbnb']):
+                            category = "travel"
+                        # Meals keywords
+                        elif any(kw in description for kw in ['meal', 'food', 'dinner', 'restaurant', 'lunch', 'breakfast', 'cafe', 'coffee']):
+                            category = "meals"
+                        # Equipment keywords
+                        elif any(kw in description for kw in ['laptop', 'monitor', 'software', 'computer', 'keyboard', 'mouse', 'phone', 'tablet']):
+                            category = "equipment"
+                        # Office supplies keywords
+                        elif any(kw in description for kw in ['office', 'supplies', 'pen', 'paper', 'desk', 'chair', 'printer']):
+                            category = "office_supplies"
+                        # Accommodation keywords
+                        elif any(kw in description for kw in ['accommodation', 'lodging', 'residence', 'apartment', 'room']):
+                            category = "accommodation"
+                        # Entertainment keywords
+                        elif any(kw in description for kw in ['entertainment', 'movie', 'concert', 'event', 'show', 'ticket']):
+                            category = "entertainment"
+                        
+                        break
+            
             return {
                 "action_type": "categorize_claim",
                 "action_data": {
                     "claim_id": claim_id,
-                    "category": "miscellaneous",
-                    "confidence": 0.6
+                    "category": category,
+                    "confidence": 0.7
                 },
-                "reasoning": "Fallback: Categorize as miscellaneous (default safe category)"
+                "reasoning": f"Fallback: Smart categorization to '{category}' based on keywords"
             }
         elif stage == "VERIFY_GST":
             return {
@@ -578,8 +736,8 @@ IF THE ERROR SAYS "already categorized":
         else:  # DECIDE
             return {
                 "action_type": "approve_claim",
-                "action_data": {"claim_id": claim_id},
-                "reasoning": "Fallback: Approve if verified"
+                "action_data": {"claim_id": claim_id, "approved_amount": 100.0},
+                "reasoning": "Fallback: Approve with default amount"
             }
 
 
