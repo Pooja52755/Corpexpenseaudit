@@ -656,13 +656,19 @@ IF THE ERROR SAYS "already categorized":
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                     else:
                         # Use LLM's category if valid and no keyword override matched
-                        print(f"[DEBUG] No keyword override matched, using LLM category '{category}'", file=sys.stderr)
-                        action["action_data"]["category"] = category
+                        if category == "office_supplies":
+                            print(f"[DEBUG] Blocking lazy office_supplies, defaulting to miscellaneous", file=sys.stderr)
+                            action["action_data"]["category"] = "miscellaneous"
+                        else:
+                            # Use LLM's category ONLY if it's not office_supplies
+                            action["action_data"]["category"] = category
                 
                 # FORCE AMOUNT ASSIGNMENT: For DECIDE stage, explicitly set from stored memory
                 if action.get("action_type") == "approve_claim":
-                    action["action_data"]["approved_amount"] = self.claim_states[target_claim_id].get('true_amount', 100.0)
-                    print(f"[DEBUG] FORCED approved_amount to {action['action_data']['approved_amount']} from stored true_amount", file=sys.stderr)
+                    final_amt = self.claim_states[target_claim_id].get('true_amount')
+                    if final_amt:
+                        action["action_data"]["approved_amount"] = float(final_amt)
+                        print(f"[DEBUG] Final Safety Check: Force-sending {final_amt}", file=sys.stderr)
                 
                 # FINAL VERIFICATION: Log the complete action before returning
                 print(f"[DEBUG] Final action before return: {action}", file=sys.stderr)
@@ -681,7 +687,7 @@ IF THE ERROR SAYS "already categorized":
             return self._fallback_action(state, next_stage, target_claim_id, claim_state)
     
     def _fallback_action(self, state: Dict[str, Any], stage: str, claim_id: str, claim_state: Dict) -> Dict:
-        """Smart fallback that moves through stages with keyword-based categorization."""
+        """Smart fallback that uses stored memory for accurate categorization and amounts."""
         if stage == "INSPECT":
             return {
                 "action_type": "inspect_claim",
@@ -689,43 +695,38 @@ IF THE ERROR SAYS "already categorized":
                 "reasoning": "Fallback: Start by inspecting"
             }
         elif stage == "CATEGORIZE":
-            # Smart categorization: look at claim description and match keywords
-            category = "travel"  # default to travel (most corporate expenses are travel-related)
+            # Smart categorization using STORED description from memory (not from state)
+            category = "miscellaneous"  # Default to miscellaneous (NEVER office_supplies)
             
-            if state and 'claims_summary' in state:
-                for claim_summary in state['claims_summary']:
-                    if claim_summary['claim_id'] == claim_id:
-                        description = claim_summary.get('description', '').lower()
-                        
-                        # Travel keywords
-                        if any(kw in description for kw in ['flight', 'hotel', 'travel', 'stay', 'ticket', 'booking', 'taxi', 'uber', 'airbnb']):
-                            category = "travel"
-                        # Meals keywords
-                        elif any(kw in description for kw in ['meal', 'food', 'dinner', 'restaurant', 'lunch', 'breakfast', 'cafe', 'coffee']):
-                            category = "meals"
-                        # Equipment keywords
-                        elif any(kw in description for kw in ['laptop', 'monitor', 'software', 'computer', 'keyboard', 'mouse', 'phone', 'tablet']):
-                            category = "equipment"
-                        # Office supplies keywords
-                        elif any(kw in description for kw in ['office', 'supplies', 'pen', 'paper', 'desk', 'chair', 'printer']):
-                            category = "office_supplies"
-                        # Accommodation keywords
-                        elif any(kw in description for kw in ['accommodation', 'lodging', 'residence', 'apartment', 'room']):
-                            category = "accommodation"
-                        # Entertainment keywords
-                        elif any(kw in description for kw in ['entertainment', 'movie', 'concert', 'event', 'show', 'ticket']):
-                            category = "entertainment"
-                        
-                        break
+            # Get description from memory instead of searching state
+            description = self.claim_states[claim_id].get('description', '').lower()
+            print(f"[DEBUG] Fallback using stored description: {description}", file=sys.stderr)
             
+            # Travel keywords (highest priority for most corporate expenses)
+            if any(kw in description for kw in ['cab', 'fare', 'flight', 'hotel', 'train', 'uber', 'taxi', 'stay', 'booking', 'travel', 'airline', 'airfare']):
+                category = "travel"
+            # Meals keywords
+            elif any(kw in description for kw in ['meal', 'food', 'lunch', 'dinner', 'breakfast', 'restaurant', 'cafe', 'coffee', 'lunch', 'dining']):
+                category = "meals"
+            # Equipment keywords
+            elif any(kw in description for kw in ['laptop', 'monitor', 'keyboard', 'software', 'mouse', 'computer', 'tablet', 'phone', 'hardware']):
+                category = "equipment"
+            # Accommodation keywords
+            elif any(kw in description for kw in ['accommodation', 'lodging', 'residence', 'apartment', 'room', 'hostel', 'guest']):
+                category = "accommodation"
+            # Entertainment keywords
+            elif any(kw in description for kw in ['entertainment', 'movie', 'concert', 'event', 'show', 'ticket', 'theater']):
+                category = "entertainment"
+            
+            print(f"[DEBUG] Fallback categorized to '{category}' based on keywords", file=sys.stderr)
             return {
                 "action_type": "categorize_claim",
                 "action_data": {
                     "claim_id": claim_id,
                     "category": category,
-                    "confidence": 0.7
+                    "confidence": 0.8
                 },
-                "reasoning": f"Fallback: Smart categorization to '{category}' based on keywords"
+                "reasoning": f"Fallback: Smart categorization to '{category}' based on stored keywords"
             }
         elif stage == "VERIFY_GST":
             return {
@@ -734,10 +735,13 @@ IF THE ERROR SAYS "already categorized":
                 "reasoning": "Fallback: Verify GST status"
             }
         else:  # DECIDE
+            # Use STORED true_amount instead of hardcoded 100.0
+            true_amount = self.claim_states[claim_id].get('true_amount', 100.0)
+            print(f"[DEBUG] Fallback using stored true_amount: {true_amount}", file=sys.stderr)
             return {
                 "action_type": "approve_claim",
-                "action_data": {"claim_id": claim_id, "approved_amount": 100.0},
-                "reasoning": "Fallback: Approve with default amount"
+                "action_data": {"claim_id": claim_id, "approved_amount": float(true_amount)},
+                "reasoning": f"Fallback: Approve with stored amount {true_amount}"
             }
 
 
