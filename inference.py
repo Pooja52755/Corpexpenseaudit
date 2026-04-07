@@ -182,6 +182,15 @@ class ExpenseAuditAgent:
                             self.claim_states[claim_id]["categorized"] = True
                         elif action_type == "verify_gst":
                             self.claim_states[claim_id]["verified_gst"] = True
+                            # CAPTURE GST STATUS from info
+                            gst_status = info.get('gst_status')
+                            if gst_status:
+                                self.claim_states[claim_id]['gst_status'] = gst_status
+                                print(f"[DEBUG] Captured GST status: {gst_status} for {claim_id}", file=sys.stderr)
+                                # If non_compliant, mark for rejection
+                                if gst_status == 'non_compliant':
+                                    self.claim_states[claim_id]['should_reject'] = True
+                                    print(f"[DEBUG] GST non-compliant! Will reject {claim_id} in DECIDE stage", file=sys.stderr)
                         elif action_type in ["approve_claim", "reject_claim", "flag_fraud"]:
                             self.claim_states[claim_id]["decided"] = True
                             self.completed_claims.add(claim_id)  # Mark as completed so we don't repeat it
@@ -306,6 +315,16 @@ class ExpenseAuditAgent:
                 "reasoning": "All claims processed. Exporting final report."
             }
         
+        # Track completed claims for fraud detection (description + amount pairs)
+        # This is used to detect duplicate/fraudulent claims
+        self.completed_claim_signatures = set()  # Set of (description, amount) tuples for fraud detection
+        for completed_id in self.completed_claims:
+            if completed_id in self.claim_states:
+                desc = self.claim_states[completed_id].get('description', '')
+                amt = self.claim_states[completed_id].get('true_amount', 0)
+                if desc and amt:
+                    self.completed_claim_signatures.add((desc, float(amt)))
+        
         # FIX #3: AUTO-SWITCH to next unblocked claim
         # Find first claim that isn't blocked, isn't completed, and isn't in self.completed_claims
         target_claim_id = None
@@ -330,7 +349,9 @@ class ExpenseAuditAgent:
                 "verified_gst": False,
                 "decided": False,
                 "true_amount": None,  # Will be set when inspect_claim succeeds
-                "description": ""  # Will be set when inspect_claim succeeds
+                "description": "",  # Will be set when inspect_claim succeeds
+                "gst_status": None,  # Will be set when verify_gst succeeds (compliant, non_compliant, etc.)
+                "should_reject": False  # Will be True if GST is non_compliant
             }
         
         claim_state = self.claim_states[target_claim_id]
@@ -494,7 +515,12 @@ IF THE ERROR SAYS "already categorized":
         elif next_stage == "VERIFY_GST":
             action_instruction = f"Use action_type='verify_gst' with claim_id='{target_claim_id}'. Status must be: compliant, non_compliant, not_applicable, or unverifiable."
         else:  # DECIDE
-            action_instruction = f"Use ONE of: action_type='approve_claim' OR 'reject_claim' OR 'flag_fraud' with claim_id='{target_claim_id}'."
+            # Check if we should reject due to non-compliant GST
+            gst_status = self.claim_states[target_claim_id].get('gst_status')
+            if gst_status == 'non_compliant':
+                action_instruction = f"GST is NON-COMPLIANT. Use action_type='reject_claim' with claim_id='{target_claim_id}'."
+            else:
+                action_instruction = f"Use ONE of: action_type='approve_claim' OR 'reject_claim' OR 'flag_fraud' with claim_id='{target_claim_id}'."
 
         user_message = ("Step " + str(state['current_step']) + "/" + str(state['max_steps']) + "\n\n" +
                        "STAGE: " + str(next_stage) + "\n" +
@@ -663,7 +689,23 @@ IF THE ERROR SAYS "already categorized":
                             # Use LLM's category ONLY if it's not office_supplies
                             action["action_data"]["category"] = category
                 
-                # FORCE AMOUNT ASSIGNMENT: For DECIDE stage, explicitly set from stored memory
+                # FRAUD DETECTION: Check if description+amount matches any completed claim
+                current_desc = self.claim_states[target_claim_id].get('description', '')
+                current_amt = self.claim_states[target_claim_id].get('true_amount', 0)
+                if current_desc and current_amt:
+                    claim_sig = (current_desc, float(current_amt))
+                    if claim_sig in self.completed_claim_signatures:
+                        print(f"[DEBUG] FRAUD DETECTED: Duplicate claim {claim_sig}, forcing flag_fraud", file=sys.stderr)
+                        action["action_type"] = "flag_fraud"
+                        action["action_data"] = {"claim_id": target_claim_id}
+                
+                # GST REJECTION: Force reject if GST is non_compliant
+                if self.claim_states[target_claim_id].get('should_reject'):
+                    print(f"[DEBUG] GST non-compliant, forcing reject_claim", file=sys.stderr)
+                    action["action_type"] = "reject_claim"
+                    action["action_data"] = {"claim_id": target_claim_id}
+                
+                # FORCE AMOUNT ASSIGNMENT: For APPROVE stage, explicitly set from stored memory
                 if action.get("action_type") == "approve_claim":
                     final_amt = self.claim_states[target_claim_id].get('true_amount')
                     if final_amt:
@@ -735,6 +777,41 @@ IF THE ERROR SAYS "already categorized":
                 "reasoning": "Fallback: Verify GST status"
             }
         else:  # DECIDE
+            # Check for fraud (duplicate description + amount)
+            current_desc = self.claim_states[claim_id].get('description', '')
+            current_amt = self.claim_states[claim_id].get('true_amount', 0)
+            
+            # Build fraud detection set
+            if not hasattr(self, 'completed_claim_signatures'):
+                self.completed_claim_signatures = set()
+                for cid in self.completed_claims:
+                    if cid in self.claim_states:
+                        d = self.claim_states[cid].get('description', '')
+                        a = self.claim_states[cid].get('true_amount', 0)
+                        if d and a:
+                            self.completed_claim_signatures.add((d, float(a)))
+            
+            # Check if this claim is a duplicate
+            if current_desc and current_amt:
+                claim_sig = (current_desc, float(current_amt))
+                if claim_sig in self.completed_claim_signatures:
+                    print(f"[DEBUG] Fallback fraud detection: Duplicate claim, using flag_fraud", file=sys.stderr)
+                    return {
+                        "action_type": "flag_fraud",
+                        "action_data": {"claim_id": claim_id},
+                        "reasoning": "Fallback: Flagging duplicate claim as fraud"
+                    }
+            
+            # Check GST status
+            gst_status = self.claim_states[claim_id].get('gst_status')
+            if gst_status == 'non_compliant':
+                print(f"[DEBUG] Fallback: GST non-compliant, rejecting", file=sys.stderr)
+                return {
+                    "action_type": "reject_claim",
+                    "action_data": {"claim_id": claim_id},
+                    "reasoning": "Fallback: Reject due to non-compliant GST"
+                }
+            
             # Use STORED true_amount instead of hardcoded 100.0
             true_amount = self.claim_states[claim_id].get('true_amount', 100.0)
             print(f"[DEBUG] Fallback using stored true_amount: {true_amount}", file=sys.stderr)
@@ -747,7 +824,8 @@ IF THE ERROR SAYS "already categorized":
 
 def main():
     """Main entry point - run audits and emit OpenEnv format."""
-    difficulties = ["easy", "medium", "hard"]
+    #difficulties = ["easy", "medium", "hard"]
+    difficulties = ["medium"]
     results = []
     
     for difficulty in difficulties:
