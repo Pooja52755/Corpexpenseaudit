@@ -38,7 +38,7 @@ Repository = "https://github.com/openenv/corpus-audit"
 Documentation = "https://github.com/openenv/corpus-audit/blob/main/README.md"
 
 [project.scripts]
-server = "server.app:app"
+server = "server.app:main"
 
 [tool.setuptools]
 packages = ["."]
