@@ -129,11 +129,11 @@ class ExpenseAuditAgent:
         
         # Log model capabilities
         if "gpt-4o" in self.model.lower():
-            print(f"[DEBUG] Model {self.model} - Using optimized reasoning parameters", file=sys.stderr)
+            pass
         elif "o1" in self.model.lower():
-            print(f"[DEBUG] Model {self.model} - Best-effort reasoning mode", file=sys.stderr)
+            pass
         else:
-            print(f"[DEBUG] Model {self.model} - Standard parameters (consider upgrade for better performance)", file=sys.stderr)
+            pass
         
         # Reset environment (no seeding for truly random claim IDs)
         initial_state = self.env.reset()
@@ -176,7 +176,6 @@ class ExpenseAuditAgent:
                             if details:
                                 self.claim_states[claim_id]['true_amount'] = float(details.get('amount', 100.0))
                                 self.claim_states[claim_id]['description'] = details.get('description', '')
-                                print(f"[DEBUG] Stored in Memory from claim_details: amount={self.claim_states[claim_id]['true_amount']}, desc={self.claim_states[claim_id]['description']}", file=sys.stderr)
                             else:
                                 # Fallback: try claims_summary
                                 if 'claims_summary' in state:
@@ -184,7 +183,6 @@ class ExpenseAuditAgent:
                                         if claim.get('claim_id') == claim_id:
                                             self.claim_states[claim_id]['true_amount'] = float(claim.get('amount', 100.0))
                                             self.claim_states[claim_id]['description'] = claim.get('description', '')
-                                            print(f"[DEBUG] Stored in Memory from claims_summary: amount={self.claim_states[claim_id]['true_amount']}, desc={self.claim_states[claim_id]['description']}", file=sys.stderr)
                                             break
                         elif action_type == "categorize_claim":
                             self.claim_states[claim_id]["categorized"] = True
@@ -194,11 +192,9 @@ class ExpenseAuditAgent:
                             gst_status = info.get('gst_status')
                             if gst_status:
                                 self.claim_states[claim_id]['gst_status'] = gst_status
-                                print(f"[DEBUG] Captured GST status: {gst_status} for {claim_id}", file=sys.stderr)
                                 # If non_compliant, mark for rejection
                                 if gst_status == 'non_compliant':
                                     self.claim_states[claim_id]['should_reject'] = True
-                                    print(f"[DEBUG] GST non-compliant! Will reject {claim_id} in DECIDE stage", file=sys.stderr)
                         elif action_type in ["approve_claim", "reject_claim", "flag_fraud"]:
                             self.claim_states[claim_id]["decided"] = True
                             self.completed_claims.add(claim_id)  # Mark as completed so we don't repeat it
@@ -230,7 +226,7 @@ class ExpenseAuditAgent:
                         self.consecutive_errors += 1
                     # Force break if too many consecutive errors (rate limit protection)
                     if self.consecutive_errors >= 5:
-                        print(f"[DEBUG] Too many consecutive errors, breaking loop to prevent rate limit", file=sys.stderr)
+                        pass
                         break
                 else:
                     # Success - reset error counter
@@ -303,16 +299,15 @@ class ExpenseAuditAgent:
         pending = state['pending_claims']
         min_steps_required = int(state['max_steps'] * 0.6)
         
-        print(f"[DEBUG] _get_agent_action called: {state['current_step']}/{state['max_steps']} | Pending: {len(pending)}/{len(state['claims_summary'])}", file=sys.stderr)
         if pending:
-            print(f"[DEBUG] Pending claims: {pending[:5]}", file=sys.stderr)
+            pass
         
         # Force export only if BOTH conditions are met:
         # 1. No pending claims left, AND
         # 2. Enough steps have been used (60%+)
         if not pending:
             if state['current_step'] >= min_steps_required:
-                print(f"[DEBUG] ✅ AUTO-EXPORT: {state['current_step']}/{state['max_steps']} steps used, all claims done", file=sys.stderr)
+                pass
                 return {
                     "action_type": "export_final_report",
                     "action_data": {},
@@ -321,9 +316,7 @@ class ExpenseAuditAgent:
             else:
                 # Pending is empty but not enough steps yet - this shouldn't happen in normal flow
                 steps_remaining = state['max_steps'] - state['current_step']
-                print(f"[DEBUG] ⚠️ Claims all done but only {state['current_step']}/{state['max_steps']} steps ({int(state['current_step']/state['max_steps']*100)}%) used", file=sys.stderr)
-                print(f"[DEBUG] ERROR: This shouldn't happen - all claims done but < 60% steps!", file=sys.stderr)
-                print(f"[DEBUG] Forcing export anyway - environment may have fewer claims than expected", file=sys.stderr)
+                pass
                 # Force export anyway since there's nothing left to do
                 return {
                     "action_type": "export_final_report",
@@ -714,21 +707,17 @@ IF THE ERROR SAYS "already categorized":
             # For reasoning-focused models, use better parameters
             if "gpt-4o" in self.model.lower():
                 api_kwargs["temperature"] = 0.5  # Slightly higher for creativity in categorization
-                print(f"[DEBUG] Using optimized reasoning params for {self.model}", file=sys.stderr)
+                pass
             elif "o1" in self.model.lower():
                 # o1 models don't support temperature parameter
                 api_kwargs.pop("temperature")
                 api_kwargs.pop("top_p")
-                print(f"[DEBUG] Using o1 model (best-effort reasoning)", file=sys.stderr)
             else:
-                print(f"[DEBUG] Using standard params for {self.model}", file=sys.stderr)
+                pass
             
             response = self.client.chat.completions.create(**api_kwargs)
             
             response_text = response.choices[0].message.content.strip()
-            
-            # DEBUG: Log raw LLM response BEFORE parsing
-            print(f"[DEBUG] Raw LLM Response: {response_text[:500]}", file=sys.stderr)
             
             # Parse JSON response - GREEDY to match nested braces correctly
             # BUG FIX: Changed r'\{[\s\S]*?\}' (non-greedy) to r'\{[\s\S]*\}' (greedy)
@@ -736,11 +725,9 @@ IF THE ERROR SAYS "already categorized":
             json_match = re.search(r'\{[\s\S]*\}', response_text)
             if json_match:
                 action_json = json_match.group()
-                print(f"[DEBUG] Extracted JSON: {action_json[:300]}", file=sys.stderr)
                 try:
                     action = json.loads(action_json)
                 except json.JSONDecodeError as e:
-                    print(f"[DEBUG] JSON parse error: {e}, response was: {response_text}", file=sys.stderr)
                     return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                 
                 # ENFORCE LOWERCASE action_type
@@ -753,24 +740,13 @@ IF THE ERROR SAYS "already categorized":
                     min_steps_required = int(state['max_steps'] * 0.6)  # Must use 60% of available steps
                     steps_remaining = state['max_steps'] - state['current_step']
                     
-                    print(f"[DEBUG] ⚠️ EXPORT ATTEMPT AT STEP {state['current_step']}/{state['max_steps']}", file=sys.stderr)
-                    print(f"[DEBUG] Pending claims: {len(pending)} | Min steps required: {min_steps_required}", file=sys.stderr)
-                    
                     # Check 1: Pending claims still remain
                     if len(pending) > 0:
-                        print(f"[DEBUG] 🚫 BLOCKED: {len(pending)} pending claims remain!", file=sys.stderr)
-                        print(f"[DEBUG] Pending: {pending[:5]}", file=sys.stderr)
-                        print(f"[DEBUG] Forcing: {next_stage} action instead", file=sys.stderr)
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                     
                     # Check 2: Not enough steps used yet
                     if state['current_step'] < min_steps_required:
-                        print(f"[DEBUG] 🚫 BLOCKED: Only {state['current_step']} steps, need {min_steps_required}+", file=sys.stderr)
-                        print(f"[DEBUG] Steps remaining: {steps_remaining}. KEEP WORKING!", file=sys.stderr)
-                        print(f"[DEBUG] Forcing: {next_stage} action instead", file=sys.stderr)
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
-                    
-                    print(f"[DEBUG] ✅ EXPORT APPROVED: All {len(state['claims_summary'])} claims processed in {state['current_step']} steps", file=sys.stderr)
                 
                 # 2. Block stage skipping - force correct action
                 expected_actions = {
@@ -786,14 +762,11 @@ IF THE ERROR SAYS "already categorized":
                 
                 if action.get("action_type") not in expected and action.get("action_type") != "export_final_report":
                     # LLM tried to skip stages! Override it
-                    wrong_action = action.get("action_type")
-                    print(f"[DEBUG] Stage violation: tried {wrong_action}, expected {expected}, forcing {next_stage}", file=sys.stderr)
                     return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                 
                 # 3. Prevent repeating same action on same claim
                 if self.last_action == action.get("action_type") and self.last_action and self.last_reward < 0:
                     # Same action as last time AND last reward was negative = infinite loop!
-                    print(f"[DEBUG] Repeat action {self.last_action} with negative reward, forcing next stage", file=sys.stderr)
                     return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                 
                 # Ensure action_data exists and has claim_id
@@ -807,30 +780,25 @@ IF THE ERROR SAYS "already categorized":
                 # 1. Check categorize_claim has required fields
                 if action.get("action_type") == "categorize_claim":
                     if "category" not in action.get("action_data", {}):
-                        print(f"[DEBUG] LLM missing category field, using fallback", file=sys.stderr)
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                     # Accept LLM's category as-is (even if wrong - it learns from negative reward)
                 
                 # 2. Check approve_claim has required fields
                 if action.get("action_type") == "approve_claim":
                     if "approved_amount" not in action.get("action_data", {}):
-                        print(f"[DEBUG] LLM missing approved_amount field, using fallback", file=sys.stderr)
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                     # Accept LLM's amount as-is (even if hallucinated - it learns from negative reward)
                 
                 # FINAL VERIFICATION: Log the complete action before returning
-                print(f"[DEBUG] Final action before return: {action}", file=sys.stderr)
                 
                 # IMPORTANT: Do NOT update claim_state here! Update only after successful env.step() in run_audit
                 # This prevents premature state updates that cause re-inspection loops
                 
                 return action
             else:
-                print(f"[DEBUG] JSON extraction failed from: {response_text[:300]}", file=sys.stderr)
                 return self._fallback_action(state, next_stage, target_claim_id, claim_state)
             
         except Exception as e:
-            print(f"[DEBUG] LLM error: {e}", file=sys.stderr)
             return self._fallback_action(state, next_stage, target_claim_id, claim_state)
     
     def _fallback_action(self, state: Dict[str, Any], stage: str, claim_id: str, claim_state: Dict) -> Dict:
@@ -847,16 +815,13 @@ IF THE ERROR SAYS "already categorized":
             
             # Get description from memory instead of searching state
             description = self.claim_states[claim_id].get('description', '').lower()
-            print(f"[DEBUG] Fallback using stored description: {description}", file=sys.stderr)
             
             # PRIORITY 1: Personal/Non-business items (should be categorized as miscellaneous)
             if any(kw in description for kw in ['personal', 'grocery', 'groceries', 'household', 'private']):
                 category = "miscellaneous"
-                print(f"[DEBUG] Identified as personal/non-business → miscellaneous", file=sys.stderr)
             # PRIORITY 2: STATIONERY/PAPER/OFFICE SUPPLIES (NOT equipment!)
             elif any(kw in description for kw in ['stationery', 'paper', 'pen', 'notebook', 'printer paper', 'pens', 'stationary', 'supplies', 'office supply']):
                 category = "office_supplies"
-                print(f"[DEBUG] Identified as stationery → office_supplies", file=sys.stderr)
             # PRIORITY 3: Travel keywords (highest priority for most corporate expenses)
             elif any(kw in description for kw in ['cab', 'fare', 'flight', 'hotel', 'train', 'uber', 'taxi', 'stay', 'booking', 'travel', 'airline', 'airfare']):
                 category = "travel"
@@ -873,7 +838,6 @@ IF THE ERROR SAYS "already categorized":
             elif any(kw in description for kw in ['entertainment', 'movie', 'concert', 'event', 'show', 'ticket', 'theater']):
                 category = "entertainment"
             
-            print(f"[DEBUG] Fallback categorized to '{category}' based on keywords", file=sys.stderr)
             return {
                 "action_type": "categorize_claim",
                 "action_data": {
@@ -908,7 +872,6 @@ IF THE ERROR SAYS "already categorized":
             if current_desc and current_amt:
                 claim_sig = (current_desc, float(current_amt))
                 if claim_sig in self.completed_claim_signatures:
-                    print(f"[DEBUG] Fallback fraud detection: Duplicate claim, using flag_fraud", file=sys.stderr)
                     return {
                         "action_type": "flag_fraud",
                         "action_data": {"claim_id": claim_id},
@@ -918,7 +881,6 @@ IF THE ERROR SAYS "already categorized":
             # Check for personal/non-business items - REJECT them
             current_desc = self.claim_states[claim_id].get('description', '').lower()
             if any(kw in current_desc for kw in ['personal', 'grocery', 'groceries', 'household', 'private']):
-                print(f"[DEBUG] Fallback: Identified personal/non-business item, rejecting", file=sys.stderr)
                 return {
                     "action_type": "reject_claim",
                     "action_data": {"claim_id": claim_id, "reason": "non_business_expense"},
@@ -928,7 +890,6 @@ IF THE ERROR SAYS "already categorized":
             # Check GST status
             gst_status = self.claim_states[claim_id].get('gst_status')
             if gst_status == 'non_compliant':
-                print(f"[DEBUG] Fallback: GST non-compliant, rejecting", file=sys.stderr)
                 return {
                     "action_type": "reject_claim",
                     "action_data": {"claim_id": claim_id, "reason": "non_compliant_gst"},
@@ -937,7 +898,6 @@ IF THE ERROR SAYS "already categorized":
             
             # Use STORED true_amount instead of hardcoded 100.0
             true_amount = self.claim_states[claim_id].get('true_amount', 100.0)
-            print(f"[DEBUG] Fallback using stored true_amount: {true_amount}", file=sys.stderr)
             return {
                 "action_type": "approve_claim",
                 "action_data": {"claim_id": claim_id, "approved_amount": float(true_amount)},
@@ -947,8 +907,8 @@ IF THE ERROR SAYS "already categorized":
 
 def main():
     """Main entry point - run audits and emit OpenEnv format."""
-    #difficulties = ["easy", "medium", "hard"]
-    difficulties = ["hard"]
+    difficulties = ["easy", "medium", "hard"]
+    #difficulties = ["hard"]
     results = []
     
     for difficulty in difficulties:
