@@ -157,3 +157,31 @@ class GraderMetrics(BaseModel):
     total_steps_used: int
     efficiency_score: float
     detailed_results: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ============ OpenEnv Specification Types ============
+
+class Observation(BaseModel):
+    """OpenEnv Observation type."""
+    state: Dict[str, Any]
+    claim_details: Optional[Dict[str, Any]] = None
+    info: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Action(BaseModel):
+    """OpenEnv Action type."""
+    action_type: str
+    action_data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Reward(BaseModel):
+    """OpenEnv Reward type - simple float wrapped."""
+    value: float
+
+
+class StepResult(BaseModel):
+    """OpenEnv StepResult type."""
+    observation: Observation
+    reward: float
+    done: bool
+    info: Dict[str, Any] = Field(default_factory=dict)

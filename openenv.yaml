@@ -315,3 +315,51 @@ metadata:
   checkpoint_support: true
   deterministic: true
   max_episode_length: 60
+
+api_interface:
+  description: "OpenEnv-compatible API endpoints"
+  base_url: "http://localhost:7860"
+  endpoints:
+    - method: "POST"
+      path: "/reset"
+      description: "Reset environment and get initial observation"
+      request:
+        difficulty: "string (easy|medium|hard)"
+      response:
+        session_id: "string"
+        observation: "object (state, info)"
+        reward: "float"
+        done: "boolean"
+        info: "object"
+    
+    - method: "POST"
+      path: "/step/{session_id}"
+      description: "Execute step in environment"
+      request:
+        action_type: "string"
+        action_data: "object"
+      response:
+        session_id: "string"
+        observation: "object (state, info)"
+        reward: "float"
+        done: "boolean"
+        info: "object"
+    
+    - method: "GET"
+      path: "/state/{session_id}"
+      description: "Get current state without executing step"
+      response:
+        session_id: "string"
+        state: "object"
+        info: "object"
+
+deployment:
+  strategy: "docker"
+  container:
+    base_image: "python:3.11-slim"
+    port: 7860
+    environment_variables:
+      - "OPENAI_API_KEY"
+      - "API_BASE_URL"
+      - "MODEL_NAME"
+  startup_command: "uvicorn api:app --host 0.0.0.0 --port 7860"
