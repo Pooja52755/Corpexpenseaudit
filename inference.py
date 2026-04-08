@@ -127,6 +127,14 @@ class ExpenseAuditAgent:
         # Emit [START] line
         log_start(task=self.task_difficulty, env="CorpExpenseAudit", model=self.model)
         
+        # Log model capabilities
+        if "gpt-4o" in self.model.lower():
+            print(f"[DEBUG] Model {self.model} - Using optimized reasoning parameters", file=sys.stderr)
+        elif "o1" in self.model.lower():
+            print(f"[DEBUG] Model {self.model} - Best-effort reasoning mode", file=sys.stderr)
+        else:
+            print(f"[DEBUG] Model {self.model} - Standard parameters (consider upgrade for better performance)", file=sys.stderr)
+        
         # Reset environment (no seeding for truly random claim IDs)
         initial_state = self.env.reset()
         
@@ -507,6 +515,25 @@ IF THE ERROR SAYS "already categorized":
         
         claims_text = "\n".join(claims_context)
         
+        # BUILD MEMORY CONTEXT: Include inspection results so LLM remembers what it found
+        inspection_context = ""
+        if next_stage in ["CATEGORIZE", "VERIFY_GST", "DECIDE"]:
+            # LLM should remember what it discovered during INSPECT
+            true_amount = claim_state.get('true_amount')
+            description = claim_state.get('description')
+            gst_status = claim_state.get('gst_status')
+            
+            memory_parts = []
+            if true_amount:
+                memory_parts.append(f"Amount: ${true_amount}")
+            if description:
+                memory_parts.append(f"Description: {description}")
+            if gst_status and next_stage in ["VERIFY_GST", "DECIDE"]:
+                memory_parts.append(f"GST Status: {gst_status}")
+            
+            if memory_parts:
+                inspection_context = "📌 YOUR PREVIOUS INSPECTION RESULTS (DO NOT FORGET):\n" + "\n".join(memory_parts) + "\n\n"
+        
         # Stage-specific prompts
         if next_stage == "INSPECT":
             action_instruction = f"Use action_type='inspect_claim' with claim_id='{target_claim_id}'. Look at ALL details."
@@ -515,17 +542,14 @@ IF THE ERROR SAYS "already categorized":
         elif next_stage == "VERIFY_GST":
             action_instruction = f"Use action_type='verify_gst' with claim_id='{target_claim_id}'. Status must be: compliant, non_compliant, not_applicable, or unverifiable."
         else:  # DECIDE
-            # Check if we should reject due to non-compliant GST
-            gst_status = self.claim_states[target_claim_id].get('gst_status')
-            if gst_status == 'non_compliant':
-                action_instruction = f"GST is NON-COMPLIANT. Use action_type='reject_claim' with claim_id='{target_claim_id}'."
-            else:
-                action_instruction = f"Use ONE of: action_type='approve_claim' OR 'reject_claim' OR 'flag_fraud' with claim_id='{target_claim_id}'."
+            # LLM should see GST status in inspection_context and decide for itself
+            action_instruction = f"Use ONE of: action_type='approve_claim' OR 'reject_claim' OR 'flag_fraud' with claim_id='{target_claim_id}'. Remember the inspection results above (amount, GST status, etc) and make your decision."
 
         user_message = ("Step " + str(state['current_step']) + "/" + str(state['max_steps']) + "\n\n" +
                        "STAGE: " + str(next_stage) + "\n" +
                        "CURRENT TARGET: " + str(target_claim_id) + "\n\n" +
                        str(action_instruction) + "\n\n" +
+                       str(inspection_context) +
                        "Pending claims: " + str(len(pending)) + "\n" +
                        "Processed: " + str(len(state['claims_summary']) - len(pending)) + "/" + str(len(state['claims_summary'])) + "\n\n" +
                        "Claims Status:\n" +
@@ -571,20 +595,47 @@ IF THE ERROR SAYS "already categorized":
             # FIX: Add small delay to prevent rate limiting
             time.sleep(0.1)
             
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.5,
-                max_tokens=200
-            )
+            # Optimize parameters based on model capabilities
+            # Note: Extended thinking requires model-specific API support and SDK version
+            api_kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.3,  # Lower temperature for more consistent reasoning
+                "max_tokens": 500,    # Sufficient for JSON action responses
+                "top_p": 0.9,        # Reduce randomness for better accuracy
+            }
+            
+            # For reasoning-focused models, use better parameters
+            if "gpt-4o" in self.model.lower():
+                api_kwargs["temperature"] = 0.5  # Slightly higher for creativity in categorization
+                print(f"[DEBUG] Using optimized reasoning params for {self.model}", file=sys.stderr)
+            elif "o1" in self.model.lower():
+                # o1 models don't support temperature parameter
+                api_kwargs.pop("temperature")
+                api_kwargs.pop("top_p")
+                print(f"[DEBUG] Using o1 model (best-effort reasoning)", file=sys.stderr)
+            else:
+                print(f"[DEBUG] Using standard params for {self.model}", file=sys.stderr)
+            
+            response = self.client.chat.completions.create(**api_kwargs)
             
             response_text = response.choices[0].message.content.strip()
             
-            # Parse JSON response
-            json_match = re.search(r'\{[\s\S]*?\}', response_text)
+            # DEBUG: Log raw LLM response BEFORE parsing
+            print(f"[DEBUG] Raw LLM Response: {response_text[:500]}", file=sys.stderr)
+            
+            # Parse JSON response - GREEDY to match nested braces correctly
+            # BUG FIX: Changed r'\{[\s\S]*?\}' (non-greedy) to r'\{[\s\S]*\}' (greedy)
+            # Non-greedy stops at first }, missing the final } of outer JSON object
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
             if json_match:
                 action_json = json_match.group()
-                action = json.loads(action_json)
+                print(f"[DEBUG] Extracted JSON: {action_json[:300]}", file=sys.stderr)
+                try:
+                    action = json.loads(action_json)
+                except json.JSONDecodeError as e:
+                    print(f"[DEBUG] JSON parse error: {e}, response was: {response_text}", file=sys.stderr)
+                    return self._fallback_action(state, next_stage, target_claim_id, claim_state)
                 
                 # ENFORCE LOWERCASE action_type
                 if "action_type" in action:
@@ -628,89 +679,21 @@ IF THE ERROR SAYS "already categorized":
                 
                 if action.get("action_type") != "export_final_report":
                     action["action_data"]["claim_id"] = target_claim_id
-                    
-                    # DYNAMIC DECISION AMOUNT: Use stored true_amount from inspect stage
-                    if action.get("action_type") == "approve_claim":
-                        true_amount = self.claim_states[target_claim_id].get('true_amount', 100.0)
-                        action["action_data"]["approved_amount"] = true_amount
-                        print(f"[DEBUG] Using stored true_amount {true_amount} for {target_claim_id}", file=sys.stderr)
                 
-                # SMART DEFAULTING: Override LLM's lazy guesses with our keyword logic
+                # VALIDATION ONLY (no forcing):
+                # 1. Check categorize_claim has required fields
                 if action.get("action_type") == "categorize_claim":
-                    action_data = action.get("action_data", {})
-                    valid_categories = ["travel", "meals", "accommodation", "office_supplies", "equipment", "entertainment", "miscellaneous"]
-                    
-                    # Check 1: Missing category entirely
-                    if "category" not in action_data:
-                        print(f"[DEBUG] LLM failed to provide category, using smart fallback", file=sys.stderr)
+                    if "category" not in action.get("action_data", {}):
+                        print(f"[DEBUG] LLM missing category field, using fallback", file=sys.stderr)
                         return self._fallback_action(state, next_stage, target_claim_id, claim_state)
-                    
-                    category = action_data.get("category", "").lower()
-                    
-                    # Check 2: Invalid category not in allowed list
-                    if category not in valid_categories:
-                        print(f"[DEBUG] LLM provided invalid category '{category}', using smart fallback", file=sys.stderr)
-                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
-                    
-                    # Check 3: Dictionary-based keyword override - reads description to guarantee correct category
-                    description = self.claim_states[target_claim_id].get('description', '').lower()
-                    print(f"[DEBUG] Using stored description: {description}", file=sys.stderr)
-                    
-                    # Define keyword mappings for each category
-                    keyword_map = {
-                        'travel': ['cab', 'fare', 'flight', 'hotel', 'train', 'uber', 'taxi', 'stay'],
-                        'meals': ['food', 'lunch', 'dinner', 'restaurant', 'meal', 'cafe'],
-                        'equipment': ['laptop', 'monitor', 'keyboard', 'software', 'mouse']
-                    }
-                    
-                    # Check which category keywords match the description
-                    matched_category = None
-                    for cat, keywords in keyword_map.items():
-                        if any(kw in description for kw in keywords):
-                            matched_category = cat
-                            print(f"[DEBUG] Keyword match found for '{cat}' in description, LLM picked '{category}'", file=sys.stderr)
-                            break
-                    
-                    # STRONG OVERRIDE: If keywords found, force to that category
-                    if matched_category:
-                        print(f"[DEBUG] FORCING category to '{matched_category}' (confident keyword-based decision)", file=sys.stderr)
-                        action["action_data"]["category"] = matched_category
-                        action["action_data"]["confidence"] = 1.0
-                    elif category == "miscellaneous":
-                        # If LLM defaults to miscellaneous with no keywords found, use smart fallback
-                        print(f"[DEBUG] LLM defaulted to miscellaneous with no keyword match, using smart fallback", file=sys.stderr)
-                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
-                    else:
-                        # Use LLM's category if valid and no keyword override matched
-                        if category == "office_supplies":
-                            print(f"[DEBUG] Blocking lazy office_supplies, defaulting to miscellaneous", file=sys.stderr)
-                            action["action_data"]["category"] = "miscellaneous"
-                        else:
-                            # Use LLM's category ONLY if it's not office_supplies
-                            action["action_data"]["category"] = category
+                    # Accept LLM's category as-is (even if wrong - it learns from negative reward)
                 
-                # FRAUD DETECTION: Check if description+amount matches any completed claim
-                current_desc = self.claim_states[target_claim_id].get('description', '')
-                current_amt = self.claim_states[target_claim_id].get('true_amount', 0)
-                if current_desc and current_amt:
-                    claim_sig = (current_desc, float(current_amt))
-                    if claim_sig in self.completed_claim_signatures:
-                        print(f"[DEBUG] FRAUD DETECTED: Duplicate claim {claim_sig}, forcing flag_fraud", file=sys.stderr)
-                        action["action_type"] = "flag_fraud"
-                        action["action_data"] = {"claim_id": target_claim_id}
-                
-                # GST REJECTION: Force reject if GST is non_compliant
-                if self.claim_states[target_claim_id].get('should_reject'):
-                    print(f"[DEBUG] GST non-compliant, forcing reject_claim", file=sys.stderr)
-                    action["action_type"] = "reject_claim"
-                    action["action_data"] = {"claim_id": target_claim_id}
-                
-                # FORCE AMOUNT ASSIGNMENT: For APPROVE stage, explicitly set from stored memory
+                # 2. Check approve_claim has required fields
                 if action.get("action_type") == "approve_claim":
-                    final_amt = self.claim_states[target_claim_id].get('true_amount')
-                    if final_amt:
-                        action["action_data"]["approved_amount"] = float(final_amt)
-                        print(f"[DEBUG] Final Safety Check: Force-sending {final_amt}", file=sys.stderr)
+                    if "approved_amount" not in action.get("action_data", {}):
+                        print(f"[DEBUG] LLM missing approved_amount field, using fallback", file=sys.stderr)
+                        return self._fallback_action(state, next_stage, target_claim_id, claim_state)
+                    # Accept LLM's amount as-is (even if hallucinated - it learns from negative reward)
                 
                 # FINAL VERIFICATION: Log the complete action before returning
                 print(f"[DEBUG] Final action before return: {action}", file=sys.stderr)
@@ -720,10 +703,9 @@ IF THE ERROR SAYS "already categorized":
                 
                 return action
             else:
+                print(f"[DEBUG] JSON extraction failed from: {response_text[:300]}", file=sys.stderr)
                 return self._fallback_action(state, next_stage, target_claim_id, claim_state)
             
-        except json.JSONDecodeError:
-            return self._fallback_action(state, next_stage, target_claim_id, claim_state)
         except Exception as e:
             print(f"[DEBUG] LLM error: {e}", file=sys.stderr)
             return self._fallback_action(state, next_stage, target_claim_id, claim_state)
@@ -825,7 +807,7 @@ IF THE ERROR SAYS "already categorized":
 def main():
     """Main entry point - run audits and emit OpenEnv format."""
     #difficulties = ["easy", "medium", "hard"]
-    difficulties = ["medium"]
+    difficulties = ["medium","hard"]
     results = []
     
     for difficulty in difficulties:
