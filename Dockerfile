@@ -35,10 +35,10 @@ ENV PYTHONUNBUFFERED=1
 COPY . /app/
 
 # Verify critical files exist
-RUN test -f /app/api.py && \
+# Change this line in your Dockerfile
+RUN test -f /app/server/app.py && \
     test -f /app/models.py && \
     test -f /app/environment.py && \
-    test -f /app/inference.py && \
     echo "✓ All required files present"
 
 # Create health check script
