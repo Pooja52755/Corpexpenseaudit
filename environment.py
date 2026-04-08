@@ -48,10 +48,10 @@ class CorpExpenseAudit:
             max_steps = 40
         elif self.task_difficulty == "medium":
             claims = self._generate_medium_claims()
-            max_steps = 50
+            max_steps = 80
         elif self.task_difficulty == "hard":
             claims = self._generate_hard_claims()
-            max_steps = 60
+            max_steps = 120
         else:
             raise ValueError(f"Unknown difficulty: {self.task_difficulty}")
         
@@ -284,6 +284,10 @@ class CorpExpenseAudit:
         
         self.state.fraud_flags[claim_id] = reason
         
+        # Remove from pending since this claim is now decided
+        if claim_id in self.state.pending_claims:
+            self.state.pending_claims.remove(claim_id)
+        
         # Correct fraud detection
         if claim.is_fraud:
             reward = 0.30
@@ -307,6 +311,10 @@ class CorpExpenseAudit:
             return -0.05, {**info, "error": f"claim_id {claim_id} not found"}
         
         self.state.approvals[claim_id] = approved_amount
+        
+        # Remove from pending since this claim is now decided
+        if claim_id in self.state.pending_claims:
+            self.state.pending_claims.remove(claim_id)
         
         # Heavy penalty for approving fraud
         if claim.is_fraud:
@@ -335,6 +343,10 @@ class CorpExpenseAudit:
             return -0.05, {**info, "error": f"claim_id {claim_id} not found"}
         
         self.state.rejections[claim_id] = reason
+        
+        # Remove from pending since this claim is now decided
+        if claim_id in self.state.pending_claims:
+            self.state.pending_claims.remove(claim_id)
         
         # Correct rejection of fraudulent claim
         if claim.is_fraud:
