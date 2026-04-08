@@ -425,8 +425,8 @@ class CorpExpenseAudit:
         fraud_detection_rate = correctly_detected_fraud / sum(1 for c in self.state.all_claims if c.is_fraud) if any(c.is_fraud for c in self.state.all_claims) else 1.0
         gst_accuracy = gst_correct / total_claims if total_claims > 0 else 0
         
-        # Heavy penalty for approving fraudulent claims
-        fraud_approval_penalty = incorrectly_approved_fraudulent * 0.40
+        # Penalty for approving fraudulent claims (softened to allow recovery from missed frauds)
+        fraud_approval_penalty = incorrectly_approved_fraudulent * 0.10
         
         # Final accuracy calculation
         final_accuracy = (

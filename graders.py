@@ -136,7 +136,7 @@ class TaskGrader:
         }
         
         # Calculate final score based on difficulty
-        fraud_approval_penalty = incorrectly_approved_fraudulent * 0.40
+        fraud_approval_penalty = incorrectly_approved_fraudulent * 0.10
         
         if difficulty == "easy":
             # Easy: focus on basic categorization and simple decisions
