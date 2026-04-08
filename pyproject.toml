@@ -7,11 +7,11 @@ name = "corpexpenseaudit"
 version = "1.0.0"
 description = "Enterprise Expense Claim Auditing with AI - OpenEnv Environment"
 readme = "README.md"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "OpenEnv Hackathon Team", email = "support@corpexpenseaudit.com"}
 ]
-requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
@@ -20,7 +20,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "PyYAML>=6.0",
     "numpy>=1.24.0",
-    "requests>=2.31.0"
+    "requests>=2.31.0",
+    "openenv-core>=0.2.0"
 ]
 
 [project.optional-dependencies]
@@ -37,7 +38,7 @@ Repository = "https://github.com/openenv/corpus-audit"
 Documentation = "https://github.com/openenv/corpus-audit/blob/main/README.md"
 
 [project.scripts]
-corpexpenseaudit = "api:app"
+server = "server.app:app"
 
 [tool.setuptools]
 packages = ["."]
