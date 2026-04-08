@@ -30,6 +30,185 @@ async def health():
     }
 
 
+@app.get("/metadata")
+async def metadata():
+    """OpenEnv HTTP Standard: Metadata endpoint."""
+    return {
+        "name": "CorpExpenseAudit",
+        "description": "Enterprise Expense Claim Auditing with AI - OpenEnv Environment",
+        "version": "1.0.0",
+        "author": "OpenEnv Hackathon",
+        "support_url": "https://github.com/openenv/corpus-audit"
+    }
+
+
+@app.get("/schema")
+async def schema():
+    """OpenEnv HTTP Standard: Schema endpoint - returns action/observation/state schemas."""
+    return {
+        "action": {
+            "type": "object",
+            "properties": {
+                "action_type": {
+                    "type": "string",
+                    "enum": [
+                        "inspect_claim",
+                        "categorize_claim",
+                        "verify_gst",
+                        "flag_fraud",
+                        "approve_claim",
+                        "reject_claim",
+                        "request_more_info",
+                        "export_final_report"
+                    ]
+                },
+                "action_data": {
+                    "type": "object",
+                    "description": "Action-specific parameters"
+                }
+            },
+            "required": ["action_type", "action_data"]
+        },
+        "observation": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "task_difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
+                "current_step": {"type": "integer"},
+                "max_steps": {"type": "integer"},
+                "pending_claims": {"type": "array", "items": {"type": "string"}},
+                "reviewed_count": {"type": "integer"},
+                "total_claims": {"type": "integer"},
+                "claims_summary": {"type": "array"},
+                "total_reward": {"type": "number"},
+                "audit_complete": {"type": "boolean"},
+                "final_accuracy": {"type": "number"}
+            }
+        },
+        "state": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "task_difficulty": {"type": "string"},
+                "current_step": {"type": "integer"},
+                "max_steps": {"type": "integer"},
+                "pending_claims": {"type": "array"},
+                "reviewed_count": {"type": "integer"},
+                "total_claims": {"type": "integer"},
+                "claims_summary": {"type": "array"},
+                "total_reward": {"type": "number"},
+                "audit_complete": {"type": "boolean"},
+                "final_accuracy": {"type": "number"}
+            }
+        }
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Dict[str, Any]):
+    """OpenEnv HTTP Standard: MCP (Model Context Protocol) endpoint for JSON-RPC."""
+    try:
+        # Validate JSON-RPC format
+        if "jsonrpc" not in request:
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request - missing jsonrpc field"
+                }
+            }
+        
+        method = request.get("method", "")
+        params = request.get("params", {})
+        request_id = request.get("id")
+        
+        # Route to appropriate method
+        if method == "reset":
+            difficulty = params.get("difficulty", "easy")
+            session_id = str(uuid.uuid4())[:8]
+            
+            env = CorpExpenseAudit(task_difficulty=difficulty)
+            state_dict = env.reset()
+            
+            environments[session_id] = {
+                "env": env,
+                "difficulty": difficulty,
+                "last_action": None
+            }
+            
+            result = {
+                "session_id": session_id,
+                "observation": state_dict
+            }
+        
+        elif method == "step":
+            session_id = params.get("session_id")
+            action = params.get("action", {})
+            
+            if session_id not in environments:
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32001,
+                        "message": f"Session not found: {session_id}"
+                    },
+                    "id": request_id
+                }
+            
+            env = environments[session_id]["env"]
+            state_dict, reward, done, info = env.step(action)
+            
+            result = {
+                "observation": state_dict,
+                "reward": reward,
+                "done": done,
+                "info": info
+            }
+        
+        elif method == "state":
+            session_id = params.get("session_id")
+            
+            if session_id not in environments:
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32001,
+                        "message": f"Session not found: {session_id}"
+                    },
+                    "id": request_id
+                }
+            
+            env = environments[session_id]["env"]
+            state_dict = env.state_dict()
+            result = {"state": state_dict}
+        
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not found: {method}"
+                },
+                "id": request_id
+            }
+        
+        return {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": request_id
+        }
+    
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": f"Internal error: {str(e)}"
+            },
+            "id": request.get("id")
+        }
+
+
 # ============ OpenEnv Specification Endpoints ============
 
 @app.post("/reset")
@@ -135,6 +314,72 @@ async def get_state(session_id: str):
         }
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============ OpenEnv Standard Endpoints (without path params) ============
+
+@app.post("/step")
+async def step_standard(request_data: Dict[str, Any]):
+    """
+    OpenEnv standard step() endpoint - accepts session_id in body.
+    """
+    try:
+        session_id = request_data.get("session_id")
+        action = request_data.get("action", {})
+        
+        if not session_id:
+            raise ValueError("session_id required in request body")
+        
+        if session_id not in environments:
+            raise ValueError(f"Invalid or expired session_id: {session_id}")
+        
+        env = environments[session_id]["env"]
+        state_dict, reward, done, info = env.step(action)
+        
+        return {
+            "session_id": session_id,
+            "observation": {
+                "state": state_dict,
+                "info": info
+            },
+            "reward": reward,
+            "done": done,
+            "info": info
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/state")
+async def state_standard(session_id: str = None):
+    """
+    OpenEnv standard state() endpoint - accepts session_id as query param.
+    """
+    try:
+        if not session_id:
+            raise ValueError("session_id required as query parameter")
+        
+        if session_id not in environments:
+            raise ValueError(f"Invalid or expired session_id: {session_id}")
+        
+        env = environments[session_id]["env"]
+        state_dict = env.state_dict()
+        
+        return {
+            "session_id": session_id,
+            "state": state_dict,
+            "info": {
+                "difficulty": env.task_difficulty,
+                "current_step": env.state.current_step,
+                "max_steps": env.state.max_steps
+            }
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session not found")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -270,3 +515,8 @@ async def root():
             "spec": "GET /spec"
         }
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
