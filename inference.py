@@ -70,6 +70,8 @@ class ExpenseAuditAgent:
         """Initialize the agent."""
         self.task_difficulty = task_difficulty
         self.max_steps = max_steps
+
+        self.HF_TOKEN = os.getenv("HF_TOKEN")
         
         # Get LLM API config
         api_base_url = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
