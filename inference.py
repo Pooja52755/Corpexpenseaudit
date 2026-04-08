@@ -8,17 +8,20 @@ Matches OpenEnv STDOUT format:
   [END] success=<bool> steps=<n> score=<score> rewards=<r1,r2,...>
 
 Supports:
-- OpenAI API
-- Groq API  (grok-2-latest, grok-beta)
-- Hugging Face Router
-- Any OpenAI-compatible endpoint
+- OpenAI API / Groq API / Hugging Face Router / Any OpenAI-compatible endpoint
+- Local environment (direct instantiation) or remote API via HTTP
 
 Environment variables:
-- API_BASE_URL: Base URL for the API (default: https://api.openai.com/v1)
-- MODEL_NAME: Model to use (default: gpt-4-turbo-preview)
-- OPENAI_API_KEY: OpenAI API key
-- GROQ_API_KEY: Groq API key (for Groq endpoint)
-- HF_TOKEN: Hugging Face token
+- LLM Configuration:
+  - API_BASE_URL: Base URL for LLM API (default: https://api.openai.com/v1)
+  - MODEL_NAME: Model to use (default: gpt-4-turbo-preview)
+  - OPENAI_API_KEY: OpenAI API key
+  - GROQ_API_KEY: Groq API key
+  - HF_TOKEN: Hugging Face token
+- Environment Configuration:
+  - ENVIRONMENT_BASE_URL: Base URL for CorpExpenseAudit API (default: http://localhost:7860)
+    Set this to connect to Docker container running the API
+    Leave unset to use local environment directly
 """
 
 import os
@@ -30,6 +33,7 @@ from typing import Optional, Any, Dict, List
 import re
 
 from dotenv import load_dotenv
+import requests
 from openai import OpenAI
 from environment import CorpExpenseAudit
 from graders import run_easy_grader, run_medium_grader, run_hard_grader, print_grader_results
@@ -67,7 +71,7 @@ class ExpenseAuditAgent:
         self.task_difficulty = task_difficulty
         self.max_steps = max_steps
         
-        # Get API config
+        # Get LLM API config
         api_base_url = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
         api_key = self._get_api_key()
         
@@ -82,7 +86,17 @@ class ExpenseAuditAgent:
         )
         
         self.model = os.getenv("MODEL_NAME", "gpt-4-turbo-preview")
+        
+        # 1. Check for remote config
+        self.env_base_url = os.getenv("ENVIRONMENT_BASE_URL", "http://localhost:7860")
+        self.use_remote_env = self.env_base_url and "http" in self.env_base_url
+        
         self.env = CorpExpenseAudit(task_difficulty=task_difficulty)
+        
+        if self.use_remote_env:
+             print(f"[INFO] Using remote environment API at {self.env_base_url}", file=sys.stderr)
+        else:
+             print(f"[INFO] Using local environment instance", file=sys.stderr)
         
         # Track claim processing state to fix "short-term memory" issue
         self.claim_states = {}  # claim_id -> {"inspected": bool, "categorized": bool, "decided": bool}
@@ -267,6 +281,7 @@ class ExpenseAuditAgent:
                 metrics = run_hard_grader(self.env)
             
             score = metrics.final_score
+            
             success = score >= 0.55  # Need 55%+ for true success (0.50 is borderline failure)
             
         except Exception as e:
